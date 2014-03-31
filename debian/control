@@ -1,0 +1,44 @@
+Source: python-glanceclient
+Section: python
+Priority: extra
+Maintainer: Chuck Short <zulcss@ubuntu.com>
+Build-Depends:
+ debhelper (>= 8.0.0),
+ python-all (>= 2.6.6-3~),
+ python-d2to1,
+ python-httplib2,
+ python-keystoneclient,
+ python-mox,
+ python-nose,
+ python-openssl,
+ python-pbr,
+ python-prettytable ( >= 0.6 ),
+ python-setuptools,
+ python-setuptools-git,
+ python-sphinx,
+ python-testtools,
+ python-warlock,
+ testrepository
+Standards-Version: 3.9.4
+Homepage: http://launchpad.net/glance
+Vcs-Browser: http://bazaar.launchpad.net/~ubuntu-server-dev/python-glanceclient/havana/files
+Vcs-Bzr: https://code.launchpad.net/~ubuntu-server-dev/python-glanceclient/havana
+XS-Testsuite: autopkgtest
+
+Package: python-glanceclient
+Architecture: all
+Depends:
+ python-httplib2,
+ python-keystoneclient,
+ python-openssl,
+ python-prettytable ( >= 0.6 ),
+ python-setuptools,
+ python-warlock,
+ ${misc:Depends},
+ ${python:Depends}
+Breaks: glance-client
+Replaces: glance-client
+Description: Client library for Openstack glance server.
+ This is a client for the Glance which uses the OpenStack Image API. There's a
+ Python API (the ``glanceclient`` module), and a command-line script
+ (``glance``).
