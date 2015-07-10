@@ -17,13 +17,10 @@ import copy
 import logging
 import socket
 
-from keystoneclient import adapter
-from keystoneclient import exceptions as ksc_exc
-from oslo_utils import importutils
-from oslo_utils import netutils
+from oslo.utils import netutils
 import requests
 try:
-    ProtocolError = requests.packages.urllib3.exceptions.ProtocolError
+    from requests.packages.urllib3.exceptions import ProtocolError
 except ImportError:
     ProtocolError = requests.exceptions.ConnectionError
 import six
@@ -39,11 +36,11 @@ if not hasattr(parse, 'parse_qsl'):
     import cgi
     parse.parse_qsl = cgi.parse_qsl
 
-from oslo_utils import encodeutils
-
 from glanceclient.common import https
-from glanceclient.common import utils
+from glanceclient.common.utils import safe_header
 from glanceclient import exc
+from glanceclient.openstack.common import importutils
+from glanceclient.openstack.common import strutils
 
 osprofiler_web = importutils.try_import("osprofiler.web")
 
@@ -52,71 +49,7 @@ USER_AGENT = 'python-glanceclient'
 CHUNKSIZE = 1024 * 64  # 64kB
 
 
-class _BaseHTTPClient(object):
-
-    @staticmethod
-    def _chunk_body(body):
-        chunk = body
-        while chunk:
-            chunk = body.read(CHUNKSIZE)
-            if chunk == '':
-                break
-            yield chunk
-
-    def _set_common_request_kwargs(self, headers, kwargs):
-        """Handle the common parameters used to send the request."""
-
-        # Default Content-Type is octet-stream
-        content_type = headers.get('Content-Type', 'application/octet-stream')
-
-        # NOTE(jamielennox): remove this later. Managers should pass json= if
-        # they want to send json data.
-        data = kwargs.pop("data", None)
-        if data is not None and not isinstance(data, six.string_types):
-            try:
-                data = json.dumps(data)
-                content_type = 'application/json'
-            except TypeError:
-                # Here we assume it's
-                # a file-like object
-                # and we'll chunk it
-                data = self._chunk_body(data)
-
-        headers['Content-Type'] = content_type
-        kwargs['stream'] = content_type == 'application/octet-stream'
-
-        return data
-
-    def _handle_response(self, resp):
-        if not resp.ok:
-            LOG.debug("Request returned failure status %s." % resp.status_code)
-            raise exc.from_response(resp, resp.content)
-        elif resp.status_code == requests.codes.MULTIPLE_CHOICES:
-            raise exc.from_response(resp)
-
-        content_type = resp.headers.get('Content-Type')
-
-        # Read body into string if it isn't obviously image data
-        if content_type == 'application/octet-stream':
-            # Do not read all response in memory when downloading an image.
-            body_iter = _close_after_stream(resp, CHUNKSIZE)
-        else:
-            content = resp.text
-            if content_type and content_type.startswith('application/json'):
-                # Let's use requests json method, it should take care of
-                # response encoding
-                body_iter = resp.json()
-            else:
-                body_iter = six.StringIO(content)
-                try:
-                    body_iter = json.loads(''.join([c for c in body_iter]))
-                except ValueError:
-                    body_iter = None
-
-        return resp, body_iter
-
-
-class HTTPClient(_BaseHTTPClient):
+class HTTPClient(object):
 
     def __init__(self, endpoint, **kwargs):
         self.endpoint = endpoint
@@ -129,9 +62,7 @@ class HTTPClient(_BaseHTTPClient):
 
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
-
-        if self.auth_token:
-            self.session.headers["X-Auth-Token"] = self.auth_token
+        self.session.headers["X-Auth-Token"] = self.auth_token
 
         self.timeout = float(kwargs.get('timeout', 600))
 
@@ -161,13 +92,13 @@ class HTTPClient(_BaseHTTPClient):
         return netutils.urlsplit(endpoint)
 
     def log_curl_request(self, method, url, headers, data, kwargs):
-        curl = ['curl -g -i -X %s' % method]
+        curl = ['curl -i -X %s' % method]
 
         headers = copy.deepcopy(headers)
         headers.update(self.session.headers)
 
         for (key, value) in six.iteritems(headers):
-            header = '-H \'%s: %s\'' % utils.safe_header(key, value)
+            header = '-H \'%s: %s\'' % safe_header(key, value)
             curl.append(header)
 
         if not self.session.verify:
@@ -184,22 +115,21 @@ class HTTPClient(_BaseHTTPClient):
 
         curl.append(url)
 
-        msg = ' '.join([encodeutils.safe_decode(item, errors='ignore')
+        msg = ' '.join([strutils.safe_encode(item, errors='ignore')
                         for item in curl])
         LOG.debug(msg)
 
     @staticmethod
-    def log_http_response(resp):
+    def log_http_response(resp, body=None):
         status = (resp.raw.version / 10.0, resp.status_code, resp.reason)
         dump = ['\nHTTP/%.1f %s %s' % status]
         headers = resp.headers.items()
-        dump.extend(['%s: %s' % utils.safe_header(k, v) for k, v in headers])
+        dump.extend(['%s: %s' % safe_header(k, v) for k, v in headers])
         dump.append('')
-        content_type = resp.headers.get('Content-Type')
-
-        if content_type != 'application/octet-stream':
-            dump.extend([resp.text, ''])
-        LOG.debug('\n'.join([encodeutils.safe_decode(x, errors='ignore')
+        if body:
+            body = strutils.safe_decode(body)
+            dump.extend([body, ''])
+        LOG.debug('\n'.join([strutils.safe_encode(x, errors='ignore')
                              for x in dump]))
 
     @staticmethod
@@ -213,8 +143,8 @@ class HTTPClient(_BaseHTTPClient):
         :returns: Dictionary with encoded headers'
                   names and values
         """
-        return dict((encodeutils.safe_encode(h), encodeutils.safe_encode(v))
-                    for h, v in six.iteritems(headers) if v is not None)
+        return dict((strutils.safe_encode(h), strutils.safe_encode(v))
+                    for h, v in six.iteritems(headers))
 
     def _request(self, method, url, **kwargs):
         """Send an http request with the specified characteristics.
@@ -222,13 +152,31 @@ class HTTPClient(_BaseHTTPClient):
         as setting headers and error handling.
         """
         # Copy the kwargs so we can reuse the original in case of redirects
-        headers = copy.deepcopy(kwargs.pop('headers', {}))
+        headers = kwargs.pop("headers", {})
+        headers = headers and copy.deepcopy(headers) or {}
 
-        if self.identity_headers:
-            for k, v in six.iteritems(self.identity_headers):
-                headers.setdefault(k, v)
+        # Default Content-Type is octet-stream
+        content_type = headers.get('Content-Type', 'application/octet-stream')
 
-        data = self._set_common_request_kwargs(headers, kwargs)
+        def chunk_body(body):
+            chunk = body
+            while chunk:
+                chunk = body.read(CHUNKSIZE)
+                yield chunk
+
+        data = kwargs.pop("data", None)
+        if data is not None and not isinstance(data, six.string_types):
+            try:
+                data = json.dumps(data)
+                content_type = 'application/json'
+            except TypeError:
+                # Here we assume it's
+                # a file-like object
+                # and we'll chunk it
+                data = chunk_body(data)
+
+        headers['Content-Type'] = content_type
+        stream = True if content_type == 'application/octet-stream' else False
 
         if osprofiler_web:
             headers.update(osprofiler_web.get_trace_id_headers())
@@ -238,20 +186,20 @@ class HTTPClient(_BaseHTTPClient):
         # complain.
         headers = self.encode_headers(headers)
 
-        if self.endpoint.endswith("/") or url.startswith("/"):
-            conn_url = "%s%s" % (self.endpoint, url)
-        else:
-            conn_url = "%s/%s" % (self.endpoint, url)
-        self.log_curl_request(method, conn_url, headers, data, kwargs)
-
         try:
+            if self.endpoint.endswith("/") or url.startswith("/"):
+                conn_url = "%s%s" % (self.endpoint, url)
+            else:
+                conn_url = "%s/%s" % (self.endpoint, url)
+            self.log_curl_request(method, conn_url, headers, data, kwargs)
             resp = self.session.request(method,
                                         conn_url,
                                         data=data,
+                                        stream=stream,
                                         headers=headers,
                                         **kwargs)
         except requests.exceptions.Timeout as e:
-            message = ("Error communicating with %(endpoint)s: %(e)s" %
+            message = ("Error communicating with %(endpoint)s %(e)s" %
                        dict(url=conn_url, e=e))
             raise exc.InvalidEndpoint(message=message)
         except (requests.exceptions.ConnectionError, ProtocolError) as e:
@@ -268,8 +216,34 @@ class HTTPClient(_BaseHTTPClient):
                        {'endpoint': endpoint, 'e': e})
             raise exc.CommunicationError(message=message)
 
-        resp, body_iter = self._handle_response(resp)
-        self.log_http_response(resp)
+        if not resp.ok:
+            LOG.debug("Request returned failure status %s." % resp.status_code)
+            raise exc.from_response(resp, resp.content)
+        elif resp.status_code == requests.codes.MULTIPLE_CHOICES:
+            raise exc.from_response(resp)
+
+        content_type = resp.headers.get('Content-Type')
+
+        # Read body into string if it isn't obviously image data
+        if content_type == 'application/octet-stream':
+            # Do not read all response in memory when
+            # downloading an image.
+            body_iter = resp.iter_content(chunk_size=CHUNKSIZE)
+            self.log_http_response(resp)
+        else:
+            content = resp.content
+            self.log_http_response(resp, content)
+            if content_type and content_type.startswith('application/json'):
+                # Let's use requests json method,
+                # it should take care of response
+                # encoding
+                body_iter = resp.json()
+            else:
+                body_iter = six.StringIO(content)
+                try:
+                    body_iter = json.loads(''.join([c for c in body_iter]))
+                except ValueError:
+                    body_iter = None
         return resp, body_iter
 
     def head(self, url, **kwargs):
@@ -289,56 +263,3 @@ class HTTPClient(_BaseHTTPClient):
 
     def delete(self, url, **kwargs):
         return self._request('DELETE', url, **kwargs)
-
-
-def _close_after_stream(response, chunk_size):
-    """Iterate over the content and ensure the response is closed after."""
-    # Yield each chunk in the response body
-    for chunk in response.iter_content(chunk_size=chunk_size):
-        yield chunk
-    # Once we're done streaming the body, ensure everything is closed.
-    # This will return the connection to the HTTPConnectionPool in urllib3
-    # and ideally reduce the number of HTTPConnectionPool full warnings.
-    response.close()
-
-
-class SessionClient(adapter.Adapter, _BaseHTTPClient):
-
-    def __init__(self, session, **kwargs):
-        kwargs.setdefault('user_agent', USER_AGENT)
-        kwargs.setdefault('service_type', 'image')
-        super(SessionClient, self).__init__(session, **kwargs)
-
-    def request(self, url, method, **kwargs):
-        headers = kwargs.pop('headers', {})
-        kwargs['raise_exc'] = False
-        data = self._set_common_request_kwargs(headers, kwargs)
-
-        try:
-            resp = super(SessionClient, self).request(url,
-                                                      method,
-                                                      headers=headers,
-                                                      data=data,
-                                                      **kwargs)
-        except ksc_exc.RequestTimeout as e:
-            message = ("Error communicating with %(endpoint)s %(e)s" %
-                       dict(url=conn_url, e=e))
-            raise exc.InvalidEndpoint(message=message)
-        except ksc_exc.ConnectionRefused as e:
-            conn_url = self.get_endpoint(auth=kwargs.get('auth'))
-            conn_url = "%s/%s" % (conn_url.rstrip('/'), url.lstrip('/'))
-            message = ("Error finding address for %(url)s: %(e)s" %
-                       dict(url=conn_url, e=e))
-            raise exc.CommunicationError(message=message)
-
-        return self._handle_response(resp)
-
-
-def get_http_client(endpoint=None, session=None, **kwargs):
-    if session:
-        return SessionClient(session, **kwargs)
-    elif endpoint:
-        return HTTPClient(endpoint, **kwargs)
-    else:
-        raise AttributeError('Constructing a client must contain either an '
-                             'endpoint or a session')

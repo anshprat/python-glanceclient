@@ -24,7 +24,6 @@ import sys
 import threading
 import uuid
 
-from oslo_utils import importutils
 import six
 
 if os.name == 'nt':
@@ -32,11 +31,11 @@ if os.name == 'nt':
 else:
     msvcrt = None
 
-from oslo_utils import encodeutils
-from oslo_utils import strutils
 import prettytable
 
 from glanceclient import exc
+from glanceclient.openstack.common import importutils
+from glanceclient.openstack.common import strutils
 
 _memoized_property_lock = threading.Lock()
 
@@ -82,17 +81,6 @@ def schema_args(schema_getter, omit=None):
                 kwargs = {}
 
                 type_str = property.get('type', 'string')
-
-                if isinstance(type_str, list):
-                    # NOTE(flaper87): This means the server has
-                    # returned something like `['null', 'string']`,
-                    # therfore we use the first non-`null` type as
-                    # the valid type.
-                    for t in type_str:
-                        if t != 'null':
-                            type_str = t
-                            break
-
                 if type_str == 'array':
                     items = property.get('items')
                     kwargs['type'] = typemap.get(items.get('type'))
@@ -109,13 +97,8 @@ def schema_args(schema_getter, omit=None):
                 if 'enum' in property:
                     if len(description):
                         description += " "
-
-                    # NOTE(flaper87): Make sure all values are `str/unicode`
-                    # for the `join` to succeed. Enum types can also be `None`
-                    # therfore, join's call would fail without the following
-                    # list comprehension
-                    vals = [six.text_type(val) for val in property.get('enum')]
-                    description += ('Valid values: ' + ', '.join(vals))
+                    description += ("Valid values: " +
+                                    ', '.join(property.get('enum')))
                 kwargs['help'] = description
 
                 func.__dict__.setdefault('arguments',
@@ -151,7 +134,7 @@ def print_list(objs, fields, formatters=None, field_settings=None):
                 row.append(data)
         pt.add_row(row)
 
-    print(encodeutils.safe_decode(pt.get_string()))
+    print(strutils.safe_encode(pt.get_string()))
 
 
 def print_dict(d, max_column_width=80):
@@ -162,7 +145,7 @@ def print_dict(d, max_column_width=80):
         if isinstance(v, (dict, list)):
             v = json.dumps(v)
         pt.add_row([k, v])
-    print(encodeutils.safe_decode(pt.get_string(sortby='Property')))
+    print(strutils.safe_encode(pt.get_string(sortby='Property')))
 
 
 def find_resource(manager, name_or_id):
@@ -176,9 +159,7 @@ def find_resource(manager, name_or_id):
 
     # now try to get entity as uuid
     try:
-        # This must be unicode for Python 3 compatibility.
-        # If you pass a bytestring to uuid.UUID, you will get a TypeError
-        uuid.UUID(encodeutils.safe_decode(name_or_id))
+        uuid.UUID(strutils.safe_encode(name_or_id))
         return manager.get(name_or_id)
     except (ValueError, exc.NotFound):
         pass
@@ -234,10 +215,10 @@ def import_versioned_module(version, submodule=None):
     return importutils.import_module(module)
 
 
-def exit(msg='', exit_code=1):
+def exit(msg=''):
     if msg:
-        print(encodeutils.safe_decode(msg), file=sys.stderr)
-    sys.exit(exit_code)
+        print(strutils.safe_encode(msg), file=sys.stderr)
+    sys.exit(1)
 
 
 def save_image(data, path):
@@ -294,7 +275,7 @@ def exception_to_str(exc):
         except UnicodeError:
             error = ("Caught '%(exception)s' exception." %
                      {"exception": exc.__class__.__name__})
-    return encodeutils.safe_decode(error, errors='ignore')
+    return strutils.safe_encode(error, errors='ignore')
 
 
 def get_file_size(file_obj):
@@ -354,30 +335,20 @@ def get_data_file(args):
 
 def strip_version(endpoint):
     """Strip version from the last component of endpoint if present."""
-    # NOTE(flaper87): This shouldn't be necessary if
-    # we make endpoint the first argument. However, we
-    # can't do that just yet because we need to keep
-    # backwards compatibility.
-    if not isinstance(endpoint, six.string_types):
-        raise ValueError("Expected endpoint")
-
-    version = None
     # Get rid of trailing '/' if present
-    endpoint = endpoint.rstrip('/')
+    if endpoint.endswith('/'):
+        endpoint = endpoint[:-1]
     url_bits = endpoint.split('/')
     # regex to match 'v1' or 'v2.0' etc
     if re.match('v\d+\.?\d*', url_bits[-1]):
-        version = float(url_bits[-1].lstrip('v'))
         endpoint = '/'.join(url_bits[:-1])
-    return endpoint, version
+    return endpoint
 
 
-def print_image(image_obj, human_readable=False, max_col_width=None):
+def print_image(image_obj, max_col_width=None):
     ignore = ['self', 'access', 'file', 'schema']
     image = dict([item for item in six.iteritems(image_obj)
                   if item[0] not in ignore])
-    if human_readable:
-        image['size'] = make_size_human_readable(image['size'])
     if str(max_col_width).isdigit():
         print_dict(image, max_column_width=max_col_width)
     else:
@@ -426,30 +397,3 @@ def safe_header(name, value):
         return name, "{SHA1}%s" % d
     else:
         return name, value
-
-
-def endpoint_version_from_url(endpoint, default_version=None):
-    if endpoint:
-        endpoint, version = strip_version(endpoint)
-        return endpoint, version or default_version
-    else:
-        return None, default_version
-
-
-class IterableWithLength(object):
-    def __init__(self, iterable, length):
-        self.iterable = iterable
-        self.length = length
-
-    def __iter__(self):
-        try:
-            for chunk in self.iterable:
-                yield chunk
-        finally:
-            self.iterable.close()
-
-    def next(self):
-        return next(self.iterable)
-
-    def __len__(self):
-        return self.length

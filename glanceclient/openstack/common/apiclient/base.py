@@ -20,32 +20,17 @@
 Base utilities to build API operation managers and objects on top of.
 """
 
-########################################################################
-#
-# THIS MODULE IS DEPRECATED
-#
-# Please refer to
-# https://etherpad.openstack.org/p/kilo-glanceclient-library-proposals for
-# the discussion leading to this deprecation.
-#
-# We recommend checking out the python-openstacksdk project
-# (https://launchpad.net/python-openstacksdk) instead.
-#
-########################################################################
-
-
 # E1102: %s is not callable
 # pylint: disable=E1102
 
 import abc
 import copy
 
-from oslo_utils import strutils
 import six
 from six.moves.urllib import parse
 
-from glanceclient.openstack.common._i18n import _
 from glanceclient.openstack.common.apiclient import exceptions
+from glanceclient.openstack.common import strutils
 
 
 def getid(obj):
@@ -89,8 +74,8 @@ class HookableMixin(object):
 
         :param cls: class that registers hooks
         :param hook_type: hook type, e.g., '__pre_parse_args__'
-        :param args: args to be passed to every hook function
-        :param kwargs: kwargs to be passed to every hook function
+        :param **args: args to be passed to every hook function
+        :param **kwargs: kwargs to be passed to every hook function
         """
         hook_funcs = cls._hooks_map.get(hook_type) or []
         for hook_func in hook_funcs:
@@ -113,13 +98,12 @@ class BaseManager(HookableMixin):
         super(BaseManager, self).__init__()
         self.client = client
 
-    def _list(self, url, response_key=None, obj_class=None, json=None):
+    def _list(self, url, response_key, obj_class=None, json=None):
         """List the collection.
 
         :param url: a partial URL, e.g., '/servers'
         :param response_key: the key to be looked up in response dictionary,
-            e.g., 'servers'. If response_key is None - all response body
-            will be used.
+            e.g., 'servers'
         :param obj_class: class for constructing the returned objects
             (self.resource_class will be used by default)
         :param json: data that will be encoded as JSON and passed in POST
@@ -133,7 +117,7 @@ class BaseManager(HookableMixin):
         if obj_class is None:
             obj_class = self.resource_class
 
-        data = body[response_key] if response_key is not None else body
+        data = body[response_key]
         # NOTE(ja): keystone returns values as list as {'values': [ ... ]}
         #           unlike other services which just return the list...
         try:
@@ -143,17 +127,15 @@ class BaseManager(HookableMixin):
 
         return [obj_class(self, res, loaded=True) for res in data if res]
 
-    def _get(self, url, response_key=None):
+    def _get(self, url, response_key):
         """Get an object from collection.
 
         :param url: a partial URL, e.g., '/servers'
         :param response_key: the key to be looked up in response dictionary,
-            e.g., 'server'. If response_key is None - all response body
-            will be used.
+            e.g., 'server'
         """
         body = self.client.get(url).json()
-        data = body[response_key] if response_key is not None else body
-        return self.resource_class(self, data, loaded=True)
+        return self.resource_class(self, body[response_key], loaded=True)
 
     def _head(self, url):
         """Retrieve request headers for an object.
@@ -163,23 +145,21 @@ class BaseManager(HookableMixin):
         resp = self.client.head(url)
         return resp.status_code == 204
 
-    def _post(self, url, json, response_key=None, return_raw=False):
+    def _post(self, url, json, response_key, return_raw=False):
         """Create an object.
 
         :param url: a partial URL, e.g., '/servers'
         :param json: data that will be encoded as JSON and passed in POST
             request (GET will be sent by default)
         :param response_key: the key to be looked up in response dictionary,
-            e.g., 'server'. If response_key is None - all response body
-            will be used.
+            e.g., 'servers'
         :param return_raw: flag to force returning raw JSON instead of
             Python object of self.resource_class
         """
         body = self.client.post(url, json=json).json()
-        data = body[response_key] if response_key is not None else body
         if return_raw:
-            return data
-        return self.resource_class(self, data)
+            return body[response_key]
+        return self.resource_class(self, body[response_key])
 
     def _put(self, url, json=None, response_key=None):
         """Update an object with PUT method.
@@ -188,8 +168,7 @@ class BaseManager(HookableMixin):
         :param json: data that will be encoded as JSON and passed in POST
             request (GET will be sent by default)
         :param response_key: the key to be looked up in response dictionary,
-            e.g., 'servers'. If response_key is None - all response body
-            will be used.
+            e.g., 'servers'
         """
         resp = self.client.put(url, json=json)
         # PUT requests may not return a body
@@ -207,8 +186,7 @@ class BaseManager(HookableMixin):
         :param json: data that will be encoded as JSON and passed in POST
             request (GET will be sent by default)
         :param response_key: the key to be looked up in response dictionary,
-            e.g., 'servers'. If response_key is None - all response body
-            will be used.
+            e.g., 'servers'
         """
         body = self.client.patch(url, json=json).json()
         if response_key is not None:
@@ -241,10 +219,7 @@ class ManagerWithFind(BaseManager):
         matches = self.findall(**kwargs)
         num_matches = len(matches)
         if num_matches == 0:
-            msg = _("No %(name)s matching %(args)s.") % {
-                'name': self.resource_class.__name__,
-                'args': kwargs
-            }
+            msg = "No %s matching %s." % (self.resource_class.__name__, kwargs)
             raise exceptions.NotFound(msg)
         elif num_matches > 1:
             raise exceptions.NoUniqueMatch()
@@ -398,11 +373,8 @@ class CrudManager(BaseManager):
         num = len(rl)
 
         if num == 0:
-            msg = _("No %(name)s matching %(args)s.") % {
-                'name': self.resource_class.__name__,
-                'args': kwargs
-            }
-            raise exceptions.NotFound(msg)
+            msg = "No %s matching %s." % (self.resource_class.__name__, kwargs)
+            raise exceptions.NotFound(404, msg)
         elif num > 1:
             raise exceptions.NoUniqueMatch
         else:
@@ -469,10 +441,8 @@ class Resource(object):
     def human_id(self):
         """Human-readable ID which can be used for bash completion.
         """
-        if self.HUMAN_ID:
-            name = getattr(self, self.NAME_ATTR, None)
-            if name is not None:
-                return strutils.to_slug(name)
+        if self.NAME_ATTR in self.__dict__ and self.HUMAN_ID:
+            return strutils.to_slug(getattr(self, self.NAME_ATTR))
         return None
 
     def _add_details(self, info):
@@ -486,7 +456,7 @@ class Resource(object):
 
     def __getattr__(self, k):
         if k not in self.__dict__:
-            # NOTE(bcwaldon): disallow lazy-loading if already loaded once
+            #NOTE(bcwaldon): disallow lazy-loading if already loaded once
             if not self.is_loaded():
                 self.get()
                 return self.__getattr__(k)
@@ -509,8 +479,6 @@ class Resource(object):
         new = self.manager.get(self.id)
         if new:
             self._add_details(new._info)
-            self._add_details(
-                {'x_request_id': self.manager.client.last_request_id})
 
     def __eq__(self, other):
         if not isinstance(other, Resource):

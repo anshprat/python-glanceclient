@@ -13,45 +13,32 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import sys
-
 from glanceclient.common import progressbar
 from glanceclient.common import utils
 from glanceclient import exc
-from glanceclient.v2 import image_members
-from glanceclient.v2 import images
 from glanceclient.v2 import tasks
 import json
 import os
+from os.path import expanduser
 
-MEMBER_STATUS_VALUES = image_members.MEMBER_STATUS_VALUES
 IMAGE_SCHEMA = None
 
 
 def get_image_schema():
     global IMAGE_SCHEMA
     if IMAGE_SCHEMA is None:
-        schema_path = os.path.expanduser("~/.glanceclient/image_schema.json")
-        if os.path.isfile(schema_path):
+        schema_path = expanduser("~/.glanceclient/image_schema.json")
+        if os.path.exists(schema_path) and os.path.isfile(schema_path):
             with open(schema_path, "r") as f:
                 schema_raw = f.read()
                 IMAGE_SCHEMA = json.loads(schema_raw)
     return IMAGE_SCHEMA
 
 
-@utils.schema_args(get_image_schema, omit=['created_at', 'updated_at', 'file',
-                                           'checksum', 'virtual_size', 'size',
-                                           'status', 'schema', 'direct_url',
-                                           'locations'])
+@utils.schema_args(get_image_schema)
 @utils.arg('--property', metavar="<key=value>", action='append',
            default=[], help=('Arbitrary property to associate with image.'
                              ' May be used multiple times.'))
-@utils.arg('--file', metavar='<FILE>',
-           help='Local file that contains disk image to be uploaded '
-                'during creation. Must be present if images are not passed '
-                'to the client via stdin.')
-@utils.arg('--progress', action='store_true', default=False,
-           help='Show upload progress bar.')
 def do_image_create(gc, args):
     """Create a new image."""
     schema = gc.schemas.get("image")
@@ -66,26 +53,12 @@ def do_image_create(gc, args):
         key, value = datum.split('=', 1)
         fields[key] = value
 
-    file_name = fields.pop('file', None)
-    if file_name is not None and os.access(file_name, os.R_OK) is False:
-        utils.exit("File %s does not exist or user does not have read "
-                   "privileges to it" % file_name)
     image = gc.images.create(**fields)
-    try:
-        if utils.get_data_file(args) is not None:
-            args.id = image['id']
-            args.size = None
-            do_image_upload(gc, args)
-            image = gc.images.get(args.id)
-    finally:
-        utils.print_image(image)
+    utils.print_image(image)
 
 
 @utils.arg('id', metavar='<IMAGE_ID>', help='ID of image to update.')
-@utils.schema_args(get_image_schema, omit=['id', 'locations', 'created_at',
-                                           'updated_at', 'file', 'checksum',
-                                           'virtual_size', 'size', 'status',
-                                           'schema', 'direct_url', 'tags'])
+@utils.schema_args(get_image_schema, omit=['id', 'locations', 'tags'])
 @utils.arg('--property', metavar="<key=value>", action='append',
            default=[], help=('Arbitrary property to associate with image.'
                              ' May be used multiple times.'))
@@ -112,8 +85,6 @@ def do_image_update(gc, args):
     utils.print_image(image)
 
 
-@utils.arg('--limit', metavar='<LIMIT>', default=None, type=int,
-           help='Maximum number of images to get.')
 @utils.arg('--page-size', metavar='<SIZE>', default=None, type=int,
            help='Number of images to request in each paginated request.')
 @utils.arg('--visibility', metavar='<VISIBILITY>',
@@ -122,68 +93,32 @@ def do_image_update(gc, args):
            help='The status of images to display.')
 @utils.arg('--owner', metavar='<OWNER>',
            help='Display images owned by <OWNER>.')
-@utils.arg('--property-filter', metavar='<KEY=VALUE>',
-           help="Filter images by a user-defined image property.",
-           action='append', dest='properties', default=[])
 @utils.arg('--checksum', metavar='<CHECKSUM>',
            help='Displays images that match the checksum.')
 @utils.arg('--tag', metavar='<TAG>', action='append',
            help="Filter images by a user-defined tag.")
-@utils.arg('--sort-key', default=[], action='append',
-           choices=images.SORT_KEY_VALUES,
-           help='Sort image list by specified fields.')
-@utils.arg('--sort-dir', default=[], action='append',
-           choices=images.SORT_DIR_VALUES,
-           help='Sort image list in specified directions.')
-@utils.arg('--sort', metavar='<key>[:<direction>]', default=None,
-           help=(("Comma-separated list of sort keys and directions in the "
-                  "form of <key>[:<asc|desc>]. Valid keys: %s. OPTIONAL: "
-                  "Default='name:asc'.") % ', '.join(images.SORT_KEY_VALUES)))
 def do_image_list(gc, args):
     """List images you can access."""
     filter_keys = ['visibility', 'member_status', 'owner', 'checksum', 'tag']
     filter_items = [(key, getattr(args, key)) for key in filter_keys]
-    if args.properties:
-        filter_properties = [prop.split('=', 1) for prop in args.properties]
-        if any(len(pair) != 2 for pair in filter_properties):
-            utils.exit('Argument --property-filter expected properties in the'
-                       ' format KEY=VALUE')
-        filter_items += filter_properties
     filters = dict([item for item in filter_items if item[1] is not None])
 
     kwargs = {'filters': filters}
-    if args.limit is not None:
-        kwargs['limit'] = args.limit
     if args.page_size is not None:
         kwargs['page_size'] = args.page_size
 
-    if args.sort_key:
-        kwargs['sort_key'] = args.sort_key
-    if args.sort_dir:
-        kwargs['sort_dir'] = args.sort_dir
-    if args.sort is not None:
-        kwargs['sort'] = args.sort
-    elif not args.sort_dir and not args.sort_key:
-        kwargs['sort'] = 'name:asc'
-
-    columns = ['ID', 'Name']
-
-    if args.verbose:
-        columns += ['owner', 'status']
-
     images = gc.images.list(**kwargs)
+    columns = ['ID', 'Name']
     utils.print_list(images, columns)
 
 
 @utils.arg('id', metavar='<IMAGE_ID>', help='ID of image to describe.')
-@utils.arg('--human-readable', action='store_true', default=False,
-           help='Print image size in a human-friendly format.')
 @utils.arg('--max-column-width', metavar='<integer>', default=80,
            help='The max column width of the printed table.')
 def do_image_show(gc, args):
     """Describe a specific image."""
     image = gc.images.get(args.id)
-    utils.print_image(image, args.human_readable, int(args.max_column_width))
+    utils.print_image(image, int(args.max_column_width))
 
 
 @utils.arg('--image-id', metavar='<IMAGE_ID>', required=True,
@@ -213,10 +148,7 @@ def do_member_delete(gc, args):
 @utils.arg('member_id', metavar='<MEMBER_ID>',
            help='Tenant to update.')
 @utils.arg('member_status', metavar='<MEMBER_STATUS>',
-           choices=MEMBER_STATUS_VALUES,
-           help='Updated status of member.'
-                ' Valid Values: %s' %
-                ', '.join(str(val) for val in MEMBER_STATUS_VALUES))
+           help='Updated status of member.')
 def do_member_update(gc, args):
     """Update the status of a member for a given image."""
     if not (args.image_id and args.member_id and args.member_status):
@@ -260,8 +192,8 @@ def do_explain(gc, args):
 
 @utils.arg('--file', metavar='<FILE>',
            help='Local file to save downloaded image data to. '
-                'If this is not specified and there is no redirection '
-                'the image data will be not be saved.')
+                'If this is not specified the image data will be '
+                'written to stdout.')
 @utils.arg('id', metavar='<IMAGE_ID>', help='ID of image to download.')
 @utils.arg('--progress', action='store_true', default=False,
            help='Show download progress bar.')
@@ -270,13 +202,7 @@ def do_image_download(gc, args):
     body = gc.images.data(args.id)
     if args.progress:
         body = progressbar.VerboseIteratorWrapper(body, len(body))
-    if not (sys.stdout.isatty() and args.file is None):
-        utils.save_image(body, args.file)
-    else:
-        msg = ('No redirection or local file specified for downloaded image '
-               'data. Please specify a local file with --file to save '
-               'downloaded image or redirect output to another source.')
-        utils.exit(msg)
+    utils.save_image(body, args.file)
 
 
 @utils.arg('--file', metavar='<FILE>',
@@ -297,20 +223,13 @@ def do_image_upload(gc, args):
     image_data = utils.get_data_file(args)
     if args.progress:
         filesize = utils.get_file_size(image_data)
-        if filesize is not None:
-            # NOTE(kragniz): do not show a progress bar if the size of the
-            # input is unknown (most likely a piped input)
-            image_data = progressbar.VerboseFileWrapper(image_data, filesize)
+        image_data = progressbar.VerboseFileWrapper(image_data, filesize)
     gc.images.upload(args.id, image_data, args.size)
 
 
 @utils.arg('id', metavar='<IMAGE_ID>', help='ID of image to delete.')
 def do_image_delete(gc, args):
     """Delete specified image."""
-    image = gc.images.get(args.id)
-    if image and image.status == "deleted":
-        msg = "No image with an ID of '%s' exists." % image.id
-        utils.exit(msg)
     gc.images.delete(args.id)
 
 
@@ -394,9 +313,8 @@ NAMESPACE_SCHEMA = None
 def get_namespace_schema():
     global NAMESPACE_SCHEMA
     if NAMESPACE_SCHEMA is None:
-        schema_path = os.path.expanduser("~/.glanceclient/"
-                                         "namespace_schema.json")
-        if os.path.isfile(schema_path):
+        schema_path = expanduser("~/.glanceclient/namespace_schema.json")
+        if os.path.exists(schema_path) and os.path.isfile(schema_path):
             with open(schema_path, "r") as f:
                 schema_raw = f.read()
                 NAMESPACE_SCHEMA = json.loads(schema_raw)
@@ -534,9 +452,8 @@ RESOURCE_TYPE_SCHEMA = None
 def get_resource_type_schema():
     global RESOURCE_TYPE_SCHEMA
     if RESOURCE_TYPE_SCHEMA is None:
-        schema_path = os.path.expanduser("~/.glanceclient/"
-                                         "resource_type_schema.json")
-        if os.path.isfile(schema_path):
+        schema_path = expanduser("~/.glanceclient/resource_type_schema.json")
+        if os.path.exists(schema_path) and os.path.isfile(schema_path):
             with open(schema_path, "r") as f:
                 schema_raw = f.read()
                 RESOURCE_TYPE_SCHEMA = json.loads(schema_raw)

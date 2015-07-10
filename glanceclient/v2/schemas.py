@@ -14,7 +14,6 @@
 #    under the License.
 
 import copy
-import json
 import jsonpatch
 import six
 import warlock.model as warlock
@@ -30,42 +29,24 @@ class SchemaBasedModel(warlock.Model):
     expects.
     """
 
-    def _make_custom_patch(self, new, original):
-        if not self.get('tags'):
-            tags_patch = []
-        else:
-            tags_patch = [{"path": "/tags",
-                          "value": self.get('tags'),
-                          "op": "replace"}]
-
-        patch_string = jsonpatch.make_patch(original, new).to_string()
-        patch = json.loads(patch_string)
-        if not patch:
-            return json.dumps(tags_patch)
-        else:
-            return json.dumps(patch + tags_patch)
-
     @warlock.Model.patch.getter
     def patch(self):
         """Return a jsonpatch object representing the delta."""
         original = copy.deepcopy(self.__dict__['__original__'])
         new = dict(self)
-        if self.schema:
+        if self.__dict__['schema']:
             for (name, prop) in six.iteritems(self.schema['properties']):
                 if (name not in original and name in new and
                         prop.get('is_base', True)):
                     original[name] = None
 
-        original['tags'] = None
-        new['tags'] = None
-        return self._make_custom_patch(new, original)
+        return jsonpatch.make_patch(original, dict(self)).to_string()
 
 
 class SchemaProperty(object):
     def __init__(self, name, **kwargs):
         self.name = name
         self.description = kwargs.get('description')
-        self.is_base = kwargs.get('is_base', True)
 
 
 def translate_schema_properties(schema_properties):
@@ -87,27 +68,9 @@ class Schema(object):
         self.properties = translate_schema_properties(raw_properties)
 
     def is_core_property(self, property_name):
-        """Checks if a property with a given name is known to the schema,
-        i.e. is either a base property or a custom one registered in
-        schema-image.json file
-
-        :param property_name: name of the property
-        :returns: True if the property is known, False otherwise
-        """
-        return self._check_property(property_name, True)
-
-    def is_base_property(self, property_name):
-        """Checks if a property with a given name is a base property
-
-        :param property_name: name of the property
-        :returns: True if the property is base, False otherwise
-        """
-        return self._check_property(property_name, False)
-
-    def _check_property(self, property_name, allow_non_base):
         for prop in self.properties:
             if property_name == prop.name:
-                return prop.is_base or allow_non_base
+                return True
         return False
 
     def raw(self):

@@ -15,34 +15,26 @@
 
 from __future__ import print_function
 
+import argparse
 import copy
-import functools
-import os
 import six
 import sys
-
-from oslo_utils import encodeutils
-from oslo_utils import strutils
 
 from glanceclient.common import progressbar
 from glanceclient.common import utils
 from glanceclient import exc
+from glanceclient.openstack.common import strutils
 import glanceclient.v1.images
 
 CONTAINER_FORMATS = 'Acceptable formats: ami, ari, aki, bare, and ovf.'
 DISK_FORMATS = ('Acceptable formats: ami, ari, aki, vhd, vmdk, raw, '
                 'qcow2, vdi, and iso.')
 
-_bool_strict = functools.partial(strutils.bool_from_string, strict=True)
-
 
 @utils.arg('--name', metavar='<NAME>',
            help='Filter images to those that have this name.')
 @utils.arg('--status', metavar='<STATUS>',
            help='Filter images to those that have this status.')
-@utils.arg('--changes-since', metavar='<CHANGES_SINCE>',
-           help='Filter images to those that changed since the given time'
-                ', which will include the deleted images.')
 @utils.arg('--container-format', metavar='<CONTAINER_FORMAT>',
            help='Filter images to those that have this container format. '
                 + CONTAINER_FORMATS)
@@ -67,7 +59,7 @@ _bool_strict = functools.partial(strutils.bool_from_string, strict=True)
            choices=glanceclient.v1.images.SORT_DIR_VALUES,
            help='Sort image list in specified direction.')
 @utils.arg('--is-public',
-           type=_bool_strict, metavar='{True,False}',
+           type=strutils.bool_from_string, metavar='{True,False}',
            help=('Allows the user to select a listing of public or non '
                  'public images.'))
 @utils.arg('--owner', default=None, metavar='<TENANT_ID>',
@@ -83,19 +75,12 @@ _bool_strict = functools.partial(strutils.bool_from_string, strict=True)
 def do_image_list(gc, args):
     """List images you can access."""
     filter_keys = ['name', 'status', 'container_format', 'disk_format',
-                   'size_min', 'size_max', 'is_public', 'changes_since']
+                   'size_min', 'size_max', 'is_public']
     filter_items = [(key, getattr(args, key)) for key in filter_keys]
     filters = dict([item for item in filter_items if item[1] is not None])
 
-    if 'changes_since' in filters:
-        filters['changes-since'] = filters.pop('changes_since')
-
     if args.properties:
         property_filter_items = [p.split('=', 1) for p in args.properties]
-        if any(len(pair) != 2 for pair in property_filter_items):
-            utils.exit('Argument --property-filter requires properties in the'
-                       ' format KEY=VALUE')
-
         filters['properties'] = dict(property_filter_items)
 
     kwargs = {'filters': filters}
@@ -153,8 +138,8 @@ def do_image_show(gc, args):
 
 @utils.arg('--file', metavar='<FILE>',
            help='Local file to save downloaded image data to. '
-                'If this is not specified and there is no redirection '
-                'the image data will be not be saved.')
+                'If this is not specified the image data will be '
+                'written to stdout.')
 @utils.arg('image', metavar='<IMAGE>', help='Name or ID of image to download.')
 @utils.arg('--progress', action='store_true', default=False,
            help='Show download progress bar.')
@@ -164,12 +149,7 @@ def do_image_download(gc, args):
     body = image.data()
     if args.progress:
         body = progressbar.VerboseIteratorWrapper(body, len(body))
-    if not (sys.stdout.isatty() and args.file is None):
-        utils.save_image(body, args.file)
-    else:
-        print('No redirection or local file specified for downloaded image '
-              'data. Please specify a local file with --file to save '
-              'downloaded image or redirect output to another source.')
+    utils.save_image(body, args.file)
 
 
 @utils.arg('--id', metavar='<IMAGE_ID>',
@@ -208,11 +188,15 @@ def do_image_download(gc, args):
            help=('Similar to \'--location\' in usage, but this indicates that'
                  ' the Glance server should immediately copy the data and'
                  ' store it in its configured image store.'))
+#NOTE(bcwaldon): This will be removed once devstack is updated
+# to use --is-public
+@utils.arg('--public', action='store_true', default=False,
+           help=argparse.SUPPRESS)
 @utils.arg('--is-public',
-           type=_bool_strict, metavar='{True,False}',
+           type=strutils.bool_from_string, metavar='{True,False}',
            help='Make image accessible to the public.')
 @utils.arg('--is-protected',
-           type=_bool_strict, metavar='{True,False}',
+           type=strutils.bool_from_string, metavar='{True,False}',
            help='Prevent image from being deleted.')
 @utils.arg('--property', metavar="<key=value>", action='append', default=[],
            help=("Arbitrary property to associate with image. "
@@ -246,26 +230,12 @@ def do_image_create(gc, args):
     # Only show progress bar for local image files
     if fields.get('data') and args.progress:
         filesize = utils.get_file_size(fields['data'])
-        if filesize is not None:
-            # NOTE(kragniz): do not show a progress bar if the size of the
-            # input is unknown (most likely a piped input)
-            fields['data'] = progressbar.VerboseFileWrapper(
-                fields['data'], filesize
-            )
+        fields['data'] = progressbar.VerboseFileWrapper(
+            fields['data'], filesize
+        )
 
     image = gc.images.create(**fields)
     _image_show(image, args.human_readable)
-
-
-def _is_image_data_provided(args):
-    """Return True if some image data has probably been provided by the user"""
-    # NOTE(kragniz): Check stdin works, then check is there is any data
-    # on stdin or a filename has been provided with --file
-    try:
-        os.fstat(0)
-    except OSError:
-        return False
-    return not sys.stdin.isatty() or args.file or args.copy_from
 
 
 @utils.arg('image', metavar='<IMAGE>', help='Name or ID of image to modify.')
@@ -288,8 +258,7 @@ def _is_image_data_provided(args):
                  'example, if the image data is stored in swift, you could '
                  'specify \'swift+http://tenant%%3Aaccount:key@auth_url/'
                  'v2.0/container/obj\'. '
-                 '(Note: \'%%3A\' is \':\' URL encoded.) '
-                 'This option only works for images in \'queued\' status.'))
+                 '(Note: \'%%3A\' is \':\' URL encoded.)'))
 @utils.arg('--file', metavar='<FILE>',
            help=('Local file that contains disk image to be uploaded during'
                  ' update. Alternatively, images can be passed to the client'
@@ -299,13 +268,12 @@ def _is_image_data_provided(args):
 @utils.arg('--copy-from', metavar='<IMAGE_URL>',
            help=('Similar to \'--location\' in usage, but this indicates that'
                  ' the Glance server should immediately copy the data and'
-                 ' store it in its configured image store.'
-                 ' This option only works for images in \'queued\' status.'))
+                 ' store it in its configured image store.'))
 @utils.arg('--is-public',
-           type=_bool_strict, metavar='{True,False}',
+           type=strutils.bool_from_string, metavar='{True,False}',
            help='Make image accessible to the public.')
 @utils.arg('--is-protected',
-           type=_bool_strict, metavar='{True,False}',
+           type=strutils.bool_from_string, metavar='{True,False}',
            help='Prevent image from being deleted.')
 @utils.arg('--property', metavar="<key=value>", action='append', default=[],
            help=("Arbitrary property to associate with image. "
@@ -348,12 +316,6 @@ def do_image_update(gc, args):
                 fields['data'], filesize
             )
 
-    elif _is_image_data_provided(args):
-        # NOTE(kragniz): Exit with an error if the status is not queued
-        # and image data was provided
-        utils.exit('Unable to upload image data to an image which '
-                   'is %s.' % image.status)
-
     image = gc.images.update(image, purge_props=args.purge_props, **fields)
     _image_show(image, args.human_readable)
 
@@ -364,13 +326,10 @@ def do_image_delete(gc, args):
     """Delete specified image(s)."""
     for args_image in args.images:
         image = utils.find_resource(gc.images, args_image)
-        if image and image.status == "deleted":
-            msg = "No image with an ID of '%s' exists." % image.id
-            raise exc.CommandError(msg)
         try:
             if args.verbose:
                 print('Requesting image delete for %s ...' %
-                      encodeutils.safe_decode(args_image), end=' ')
+                      strutils.safe_encode(args_image), end=' ')
 
             gc.images.delete(image)
 
@@ -390,15 +349,15 @@ def do_image_delete(gc, args):
 def do_member_list(gc, args):
     """Describe sharing permissions by image or tenant."""
     if args.image_id and args.tenant_id:
-        utils.exit('Unable to filter members by both --image-id and'
-                   ' --tenant-id.')
+        print('Unable to filter members by both --image-id and --tenant-id.')
+        sys.exit(1)
     elif args.image_id:
         kwargs = {'image': args.image_id}
     elif args.tenant_id:
         kwargs = {'member': args.tenant_id}
     else:
-        utils.exit('Unable to list all members. Specify --image-id or'
-                   ' --tenant-id')
+        print('Unable to list all members. Specify --image-id or --tenant-id')
+        sys.exit(1)
 
     members = gc.image_members.list(**kwargs)
     columns = ['Image ID', 'Member ID', 'Can Share']
